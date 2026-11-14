@@ -21,6 +21,9 @@ on:
       image:
         description: ROCm container to build and test in
         default: rocm/dev-ubuntu-24.04:10.0.0-full
+      label:
+        description: Name for this run's results (and its concurrency group)
+        default: release
   workflow_call:
     inputs:
       image: {type: string, default: rocm/dev-ubuntu-24.04:10.0.0-full}
@@ -126,6 +129,20 @@ jobs:
                 export LD_LIBRARY_PATH="$(dirname "$hiplib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
                 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
               fi
+              # The device limits Kokkos sizes teams and scratch with.
+              cat > /tmp/props.cpp <<EOF
+          #include <hip/hip_runtime.h>
+          #include <cstdio>
+          int main() {
+            hipDeviceProp_t p;
+            if (hipGetDeviceProperties(&p, 0) != hipSuccess) return 1;
+            printf("gcnArchName=%s\\nsharedMemPerBlock=%zu\\nmaxSharedMemoryPerMultiProcessor=%zu\\n"
+                   "sharedMemPerMultiprocessor=%zu\\nwarpSize=%d\\nmultiProcessorCount=%d\\n",
+                   p.gcnArchName, p.sharedMemPerBlock, p.maxSharedMemoryPerMultiProcessor,
+                   p.sharedMemPerMultiprocessor, p.warpSize, p.multiProcessorCount);
+          }
+          EOF
+              (hipcc -o /tmp/props /tmp/props.cpp && /tmp/props > /src/devprops.txt && cat /src/devprops.txt) || true
               "$ROCM_PATH/bin/hipconfig" --version > /src/hip.txt 2>/dev/null || true
               # Test failures do not fail this step; "Judge results" does, for new
               # ones. Keep failed tests full output: the judge reads gtest lines.
@@ -215,7 +232,7 @@ jobs:
               "release": "${{ github.sha }}"[:12], "combo": os.environ["IMAGE"],
               "gpu": "${{ matrix.gpu }}", "gfx": "${{ matrix.gfx }}",
               "env": {"arch": read("arch.txt"), "hip": read("hip.txt"), "image": os.environ["IMAGE"],
-                      "rocm_pip": read("rocm-pip.txt")},
+                      "rocm_pip": read("rocm-pip.txt"), "devprops": read("devprops.txt")},
               "smoke": None, "tests": tests, "job_status": "${{ job.status }}",
               "verdict": judge["verdict"], "known_failures": judge["known_failures"],
               "new_failures": judge["new_failures"],
