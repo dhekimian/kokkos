@@ -102,12 +102,17 @@ unsigned hip_internal_get_block_size(const HIPInternal *hip_instance,
       LaunchBounds::minBperSM ? LaunchBounds::minBperSM : 1;
   const unsigned shmem_per_sm =
       hip_instance->m_deviceProp.maxSharedMemoryPerMultiProcessor;
+  // A single block can never use more than sharedMemPerBlock. On RDNA in WGP
+  // mode (ROCm >= 10.1) maxSharedMemoryPerMultiProcessor reports the LDS of
+  // the whole WGP, twice the per-block limit, so it only bounds occupancy.
+  const unsigned shmem_per_block = std::min<unsigned>(
+      shmem_per_sm, hip_instance->m_deviceProp.sharedMemPerBlock);
   unsigned block_size     = tperb_reg;
   unsigned min_block_size = 0;
   do {
     unsigned total_shmem = f(block_size);
     // find how many threads we can fit with this blocksize based on LDS usage
-    unsigned tperb_shmem = total_shmem > shmem_per_sm ? 0 : block_size;
+    unsigned tperb_shmem = total_shmem > shmem_per_block ? 0 : block_size;
 
     if constexpr (BlockSize == BlockType::Max) {
       // we want the maximum blocksize possible

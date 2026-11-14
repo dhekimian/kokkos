@@ -234,7 +234,7 @@ class ParallelReduce<CombinedFunctorReducerType, Kokkos::RangePolicy<Traits...>,
         const unsigned int shared_memory_available =
             m_policy.space()
                 .impl_internal_space_instance()
-                ->m_deviceProp.maxSharedMemoryPerMultiProcessor;
+                ->m_deviceProp.sharedMemPerBlock;
         Kokkos::Impl::throw_runtime_exception(
             std::string("Kokkos::Impl::ParallelReduce< HIP > could not find a "
                         "valid execution configuration: your kernel requires " +
