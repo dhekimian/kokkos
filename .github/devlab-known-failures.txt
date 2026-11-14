@@ -5,7 +5,7 @@
 # (hip.graph_capture is skipped by GTEST_FILTER instead: it can hang).
 hip_DeathTest.abort_from_device | device-side abort is not reported as expected on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
 hip.execution_policy_with_default_execution_space_instance | fails on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
-hip_graph.* | HIP graph cases fail on RDNA; the MI300A lane filters them too | https://github.com/kokkos/kokkos/pull/9179
+hip_graph.* | HIP graph cases fail on RDNA (end_of_submit_control_flow ~10-25%, aggregate_is_awaitable up to 98% on gfx1201 under --gtest_repeat); the MI300A lane filters them too | https://github.com/kokkos/kokkos/pull/9179
 # ROCm 7.2.4 and 7.14.1 on both RDNA GPUs; passes on the same machines with ROCm 10.x.
 hip.mixed_then_host_device_nodes | ROCm 7.2/7.14: a graph with device, then_host, device nodes on a SharedSpace counter ends at 4, not 6 (one node's update lost) | not filed
 # ROCm 10.1 reports an RDNA WGP's 128 KiB LDS as maxSharedMemoryPerMultiProcessor while
@@ -14,5 +14,6 @@ hip.mixed_then_host_device_nodes | ROCm 7.2/7.14: a graph with device, then_host
 hip.view_customization_scratch_memory | ROCm 10.1: team sized from maxSharedMemoryPerMultiProcessor (128 KiB) exceeds sharedMemPerBlock (64 KiB) | not filed
 hip.team_uint8_array_reduce | ROCm 10.1: same; the reported maximum scratch underflows to 2^64-13928 | not filed
 hip.team_policy_launch_with_maximum_scratch_size | ROCm 10.1: same; team_size_max is 2 where the scratch request leaves room for 1 | not filed
-# Intermittent wrong result on the R9700 with ROCm 10.0 (1 of 3 runs): 72441 instead of 75025.
-hip.workgraph_fib | intermittent wrong sum on gfx1201 (ROCm 10.0) | not filed
+# Rare on the R9700 (about 1 in 200 repeats, ROCm 10.0/10.1): the sum misses one whole
+# subtask's Fibonacci number (72441 vs 75025, 17101 vs 17711).
+hip.workgraph_fib | rare dropped subtask on gfx1201 (ROCm 10.x), ~1 in 200 | not filed
