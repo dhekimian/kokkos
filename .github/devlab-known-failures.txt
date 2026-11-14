@@ -1,10 +1,18 @@
 # Known upstream failures: <ctest name or gtest case glob> | <reason> | <upstream link, or "not filed">
 # A failure listed here shows as a warning; anything else fails the job. A gtest
 # case only counts as known when its binary ran to the end (no crash, no timeout).
-# These are the RDNA runtime gaps reported with the gfx1151 support PR.
+# These are the RDNA runtime gaps reported with the gfx1151 support PR
+# (hip.graph_capture is skipped by GTEST_FILTER instead: it can hang).
 hip_DeathTest.abort_from_device | device-side abort is not reported as expected on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
-hip.graph_capture | HIP stream capture fails on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
 hip.execution_policy_with_default_execution_space_instance | fails on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
 hip_graph.* | HIP graph cases fail on RDNA; the MI300A lane filters them too | https://github.com/kokkos/kokkos/pull/9179
 # ROCm 7.2.4 on both RDNA GPUs; passes on the same machines with ROCm 10.0.
 hip.mixed_then_host_device_nodes | ROCm 7.2: a graph with device, then_host, device nodes on a SharedSpace counter ends at 4, not 6 (one node's update lost) | not filed
+# ROCm 10.1 reports an RDNA WGP's 128 KiB LDS as maxSharedMemoryPerMultiProcessor while
+# sharedMemPerBlock stays 64 KiB (10.0 reported 64 KiB for both). Kokkos sizes teams with
+# the former and checks launches against the latter, so these teams do not fit.
+hip.view_customization_scratch_memory | ROCm 10.1: team sized from maxSharedMemoryPerMultiProcessor (128 KiB) exceeds sharedMemPerBlock (64 KiB) | not filed
+hip.team_uint8_array_reduce | ROCm 10.1: same; the reported maximum scratch underflows to 2^64-13928 | not filed
+hip.team_policy_launch_with_maximum_scratch_size | ROCm 10.1: same; team_size_max is 2 where the scratch request leaves room for 1 | not filed
+# Intermittent wrong result on the R9700 with ROCm 10.0 (1 of 3 runs): 72441 instead of 75025.
+hip.workgraph_fib | intermittent wrong sum on gfx1201 (ROCm 10.0) | not filed
