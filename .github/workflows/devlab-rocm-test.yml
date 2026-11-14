@@ -1,0 +1,117 @@
+# Build and test Kokkos' HIP backend on consumer AMD GPUs.
+#
+# Kokkos' AMD lanes are CDNA (MI300A, MI250, MI100). This adds RDNA: a Radeon
+# 8060S (Strix Halo, gfx1151) and a Radeon AI PRO R9700 (gfx1201), each built
+# for its own Kokkos_ARCH_AMD_* in the stock ROCm container and run through
+# ctest, with the runtime gaps already known on RDNA filtered (#9179).
+#
+# Every run uploads summary-*.json (versions, device, pass/fail counts) so
+# results compare across ROCm versions; other workflows call this one for a
+# version matrix (workflow_call).
+#
+# Runners: AMD DevLab, a donated pool of ephemeral, single-use machines. One
+# job per machine; nothing persists between jobs.
+name: ROCm test (gfx1151, gfx1201)
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: ROCm container to build and test in
+        default: rocm/dev-ubuntu-24.04:10.0.0-full
+  workflow_call:
+    inputs:
+      image: {type: string, default: rocm/dev-ubuntu-24.04:10.0.0-full}
+      label: {type: string, default: release}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rocm-test-${{ github.ref }}-${{ inputs.label || 'release' }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.gpu }} (${{ matrix.gfx }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gpu: strix-halo
+            gfx: gfx1151
+            arch: AMD_GFX1151
+            large_mem: "ON"       # unified memory: room for the 64-bit-extent views
+          - gpu: radeon-r9700
+            gfx: gfx1201
+            arch: AMD_GFX1201
+            large_mem: "OFF"
+    runs-on: [self-hosted, Linux, devlab-dispatch, "${{ matrix.gpu }}"]
+    timeout-minutes: 120
+    env:
+      IMAGE: ${{ inputs.image || 'rocm/dev-ubuntu-24.04:10.0.0-full' }}
+      LABEL: ${{ inputs.label || 'release' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in ${{ env.IMAGE }}
+        run: |
+          set -euo pipefail
+          docker pull -q "$IMAGE"
+          # Known runtime gaps on RDNA (#9179); MI300A's lane filters the same graph cases.
+          filter='-hip_DeathTest.abort_from_device:hip.graph_capture:hip.execution_policy_with_default_execution_space_instance:hip_graph.*'
+          docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
+            --security-opt seccomp=unconfined -e GTEST_FILTER="$filter" \
+            -v "$PWD:/src" -w /src "$IMAGE" bash -euo pipefail -c '
+              (command -v cmake >/dev/null && command -v git >/dev/null) || \
+                (apt-get update -qq && apt-get install -y -qq cmake git >/dev/null)
+              rocminfo | grep -m1 -o "gfx[0-9a-f]*" > /src/arch.txt
+              cmake -S . -B build -DCMAKE_CXX_COMPILER=hipcc -DCMAKE_BUILD_TYPE=Release \
+                -DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_${{ matrix.arch }}=ON \
+                -DKokkos_ENABLE_TESTS=ON -DKokkos_ENABLE_LARGE_MEM_TESTS=${{ matrix.large_mem }}
+              cmake --build build -j8
+              cd build && ctest --output-on-failure --timeout 1800 --output-junit /src/junit.xml
+              /opt/rocm/bin/hipconfig --version > /src/hip.txt 2>/dev/null || true
+            '
+
+      - name: Write the run summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, datetime, xml.etree.ElementTree as ET
+          def read(p):
+              try:
+                  return open(p).read().strip()
+              except Exception:
+                  return None
+          tests = None
+          if os.path.exists("junit.xml"):
+              s = ET.parse("junit.xml").getroot()
+              s = s if s.tag == "testsuite" else s.find("testsuite")
+              n = {k: int(s.get(k, 0)) for k in ("tests", "failures", "errors", "skipped")}
+              tests = {"ran": n["tests"], "failed": n["failures"], "errors": n["errors"],
+                       "skipped": n["skipped"],
+                       "passed": n["tests"] - n["failures"] - n["errors"] - n["skipped"],
+                       "seconds": round(float(s.get("time", 0)), 1)}
+          summary = {
+              "schema": 1, "project": "kokkos", "label": os.environ["LABEL"],
+              "release": "${{ github.sha }}"[:12], "combo": os.environ["IMAGE"],
+              "gpu": "${{ matrix.gpu }}", "gfx": "${{ matrix.gfx }}",
+              "env": {"arch": read("arch.txt"), "hip": read("hip.txt"), "image": os.environ["IMAGE"]},
+              "smoke": None, "tests": tests, "job_status": "${{ job.status }}",
+              "run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+          }
+          json.dump(summary, open("summary.json", "w"), indent=1)
+          print(json.dumps(summary, indent=1))
+          PY
+
+      - name: Upload the run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devlab-summary-${{ inputs.label || 'release' }}-${{ matrix.gpu }}-${{ github.run_attempt }}
+          path: summary.json
+          retention-days: 90

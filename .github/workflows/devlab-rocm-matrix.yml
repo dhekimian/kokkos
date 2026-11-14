@@ -1,0 +1,25 @@
+# DevLab support matrix for Kokkos' HIP backend: each ROCm line its CI uses,
+# on Strix Halo and the R9700. Weekly, in the DevLab fork only.
+name: DevLab support matrix
+
+on:
+  schedule:
+    - cron: "35 9 * * 1"        # Mondays 09:35 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - {name: rocm10.0, image: "rocm/dev-ubuntu-24.04:10.0.0-full"}
+          - {name: rocm7.2, image: "rocm/dev-ubuntu-24.04:7.2.4-complete"}
+    uses: ./.github/workflows/devlab-rocm-test.yml
+    with:
+      image: ${{ matrix.image }}
+      label: ${{ matrix.name }}
