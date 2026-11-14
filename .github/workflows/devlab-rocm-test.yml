@@ -155,10 +155,12 @@ jobs:
               (hipcc -o /tmp/props /tmp/props.cpp && /tmp/props > /src/devprops.txt && cat /src/devprops.txt) || true
               "$ROCM_PATH/bin/hipconfig" --version > /src/hip.txt 2>/dev/null || true
               # Test failures do not fail this step; "Judge results" does, for new
-              # ones. Keep failed tests full output: the judge reads gtest lines.
+              # ones. Keep full test output: the judge reads gtest lines, and junit.xml
+              # shows which cases ran.
               rc=0
               (cd build && ctest --output-on-failure --timeout 300 \
-                --test-output-size-failed 10000000 --output-junit /src/junit.xml) || rc=$?
+                --test-output-size-failed 10000000 \
+                --test-output-size-passed 10000000 --output-junit /src/junit.xml) || rc=$?
               echo "$rc" > /src/ctest-rc.txt
             '
 
