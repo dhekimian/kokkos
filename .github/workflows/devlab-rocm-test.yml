@@ -75,6 +75,14 @@ jobs:
                 -DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_${{ matrix.arch }}=ON \
                 -DKokkos_ENABLE_TESTS=ON -DKokkos_ENABLE_LARGE_MEM_TESTS=${{ matrix.large_mem }}
               cmake --build build -j8
+              # Some ROCm images (10.0.0-full) do not register the HIP runtime with
+              # ld.so, so the test binaries cannot load libamdhip64; point at it.
+              hiplib=$(find -L /opt/rocm/ -name "libamdhip64.so*" -print -quit 2>/dev/null || true)
+              echo "HIP runtime: ${hiplib:-not found}"
+              if [ -n "$hiplib" ] && ! ldconfig -p | grep -q libamdhip64; then
+                export LD_LIBRARY_PATH="$(dirname "$hiplib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+              fi
               cd build && ctest --output-on-failure --timeout 1800 --output-junit /src/junit.xml
               /opt/rocm/bin/hipconfig --version > /src/hip.txt 2>/dev/null || true
             '
