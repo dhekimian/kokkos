@@ -1,0 +1,205 @@
+# Kokkos' GitLab job AMD-MI300A (.gitlab/hpsf-gitlab-ci.yml:306-352), on RDNA.
+#
+# Everything in the "ctest" step is that job's script, line for line: the same
+# ENV_CMAKE_OPTIONS, the same env vars, the same GTEST_FILTER and the same
+# `ctest -S scripts/CTestRun.cmake`. The only differences are listed here:
+#
+#   AMD-MI300A (GitLab)                     this job
+#   --------------------------------------  ------------------------------------------
+#   tags: [uo-gpu, odyssey, amd-mi300]      runs-on: [self-hosted, Linux, devlab-dispatch, <gpu>]
+#   Kokkos_ARCH_AMD_GFX942_APU=ON           Kokkos_ARCH_AMD_GFX1151=ON / _GFX1201=ON
+#   Kokkos_ARCH_ZEN4=ON                     Kokkos_ARCH_ZEN5=ON (Strix Halo) /
+#                                           Kokkos_ARCH_NATIVE=ON (R9700, see ASSUMPTION)
+#   KOKKOS_DEVICE_ID=3                      KOKKOS_DEVICE_ID=0 (one GPU per machine)
+#   CMAKE_BUILD_PARALLEL_LEVEL=48           $(nproc)
+#   CTEST_BUILD_NAME=AMD-MI300A             AMD-STRIX-HALO-GFX1151 / AMD-R9700-GFX1201
+#   CTEST_SITE=gitlab.spack.io              amd-devlab
+#   CTEST_NOTES_FILES=/builds/kokkos/...    $GITHUB_WORKSPACE/build/CMakeCache.txt
+#   CI_PIPELINE_SOURCE / CI_COMMIT_REF_NAME github.event_name / github.ref_name (same three-way
+#                                           split: schedule=Nightly/Debug, develop=Continuous/
+#                                           Release, else Experimental/RelWithDebInfo)
+#   Kokkos_ENABLE_LARGE_MEM_TESTS=ON        ON on Strix Halo; OFF on the R9700 (32 GB VM guests)
+#   submits to CDash (my.cdash.org/Kokkos)  CDash submit OFF unless cdash_submit=true: a fork
+#                                           must not post to upstream's dashboard uninvited.
+#                                           junit goes up as an artifact instead.
+#
+# ASSUMPTION (R9700 host arch): the R9700 runners are VM guests and the CPU model
+# the guest sees is not recorded anywhere in this repo. Kokkos_ARCH_NATIVE=ON is
+# what upstream's own HIP lanes on mixed hosts use (.jenkins/nightly.groovy:192,
+# snl-ci.yml SNL_HIP_ROCM_10_0). If the guests pass the host CPU through and it
+# is confirmed (lscpu on a runner), replace it with Kokkos_ARCH_ZEN4/ZEN5=ON.
+#
+# UNVERIFIED on RDNA: HSA_XNACK=1 is copied from the MI300A job. Kokkos itself
+# says gfx1151/gfx1201 cannot access system allocations
+# (core/src/HIP/Kokkos_HIP_IsXnack.hpp:47-48); if the ROCm runtime refuses to
+# start with it, run with hsa_xnack=0 and record that as a difference.
+#
+# The default image is upstream's. The 26.04 image must be reachable through
+# the pool's registry mirror before the first run.
+name: DevLab GitLab mirror (AMD-MI300A job on gfx1151, gfx1201)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: ROCm container (default = the image AMD-MI300A uses)
+        default: rocm/dev-ubuntu-26.04:7.14.0-full
+      gtest_filter:
+        description: GTEST_FILTER (default = AMD-MI300A's, verbatim)
+        default: "-hip.graph_capture:hip_graph.submit_six:hip_graph.end_of_submit_control_flow:hip_graph.aggregate_is_awaitable"
+      hsa_xnack:
+        description: HSA_XNACK (AMD-MI300A sets 1)
+        default: "1"
+      cdash_submit:
+        description: Submit to Kokkos' CDash (only with the maintainers' agreement)
+        type: boolean
+        default: false
+  schedule:
+    - cron: "35 10 * * 1"       # Mondays; a scheduled run is "Nightly" + Debug, as upstream
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitlab-mirror-${{ github.ref }}-${{ inputs.image || 'default' }}
+  cancel-in-progress: true
+
+jobs:
+  AMD-RDNA:
+    name: ${{ matrix.build_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gpu: strix-halo
+            build_name: AMD-STRIX-HALO-GFX1151
+            gpu_arch: AMD_GFX1151
+            host_arch: ZEN5          # Ryzen AI Max (Strix Halo) is Zen 5
+            large_mem: "ON"
+            junit: result_gfx1151.xml
+          - gpu: radeon-r9700
+            build_name: AMD-R9700-GFX1201
+            gpu_arch: AMD_GFX1201
+            host_arch: NATIVE        # ASSUMPTION, see header
+            large_mem: "OFF"
+            junit: result_gfx1201.xml
+    runs-on: [self-hosted, Linux, devlab-dispatch, "${{ matrix.gpu }}"]
+    timeout-minutes: 180
+    container:
+      image: ${{ inputs.image || 'rocm/dev-ubuntu-26.04:7.14.0-full' }}
+      options: >-
+        --device=/dev/kfd --device=/dev/dri --group-add video
+        --security-opt seccomp=unconfined
+    env:
+      # .common-setup variables (hpsf-gitlab-ci.yml:13-16)
+      OMP_NUM_THREADS: "8"
+      OMP_PLACES: "cores"
+      OMP_PROC_BIND: "close"
+    steps:
+      - name: apt-get update && apt-get install -y cmake git
+        run: apt-get update && apt-get install -y cmake git
+
+      - uses: actions/checkout@v4
+
+      # ctest_update() runs git in a workspace owned by the runner user, not root.
+      - run: git config --global --add safe.directory '*'
+
+      # .common-setup before_script (hpsf-gitlab-ci.yml:17-29)
+      - name: before_script
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            echo "CDASH_MODEL=Nightly" >> "$GITHUB_ENV"
+            echo "BUILD_TYPE=Debug" >> "$GITHUB_ENV"
+          elif [ "${{ github.ref_name }}" == "develop" ]; then
+            echo "CDASH_MODEL=Continuous" >> "$GITHUB_ENV"
+            echo "BUILD_TYPE=Release" >> "$GITHUB_ENV"
+          else
+            echo "CDASH_MODEL=Experimental" >> "$GITHUB_ENV"
+            echo "BUILD_TYPE=RelWithDebInfo" >> "$GITHUB_ENV"
+          fi
+
+      # AMD-MI300A script (hpsf-gitlab-ci.yml:312-339)
+      - name: ctest -S scripts/CTestRun.cmake
+        shell: bash
+        env:
+          GTEST_FILTER: ${{ inputs.gtest_filter || '-hip.graph_capture:hip_graph.submit_six:hip_graph.end_of_submit_control_flow:hip_graph.aggregate_is_awaitable' }}
+          HSA_XNACK: ${{ inputs.hsa_xnack || '1' }}
+          KOKKOS_DEVICE_ID: "0"
+          CTEST_BUILD_NAME: ${{ matrix.build_name }}
+          CDASH_SUBMIT: ${{ inputs.cdash_submit || 'false' }}
+        run: |
+          set -o pipefail
+          ulimit -c 0
+          export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
+          # Upstream hard-codes /opt/rocm-7.14.0; same directory, found for any image.
+          ROCM_PREFIX=$(readlink -f /opt/rocm)
+          export ENV_CMAKE_OPTIONS=""
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D CMAKE_PREFIX_PATH=${ROCM_PREFIX}"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D CMAKE_BUILD_TYPE=${BUILD_TYPE}"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D CMAKE_CXX_COMPILER=hipcc"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D CMAKE_CXX_FLAGS='-Werror -ftime-trace'"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D CMAKE_CXX_STANDARD=20"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D Kokkos_ENABLE_HIP=ON"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D Kokkos_ARCH_${{ matrix.gpu_arch }}=ON"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D Kokkos_ARCH_${{ matrix.host_arch }}=ON"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D Kokkos_ENABLE_LARGE_MEM_TESTS=${{ matrix.large_mem }}"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D Kokkos_ENABLE_TESTS=ON"
+          export ENV_CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS};-D Kokkos_ENABLE_COMPILER_WARNINGS=ON"
+          export LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:$LD_LIBRARY_PATH
+          # Not upstream: ROCm 10.x images keep the HIP runtime in /opt/rocm/core/lib.
+          hiplib=$(find /opt/rocm/ -name 'libamdhip64.so*' -print -quit 2>/dev/null || true)
+          [ -n "$hiplib" ] && export LD_LIBRARY_PATH="$(dirname "$hiplib"):$LD_LIBRARY_PATH"
+          echo "ROCm prefix: ${ROCM_PREFIX}; HIP runtime: ${hiplib:-not found}"
+          # Same script as upstream. Without the maintainers' agreement, run a copy
+          # that differs only by the ctest_submit() line (no post to their CDash).
+          CTEST_SCRIPT=scripts/CTestRun.cmake
+          if [ "${CDASH_SUBMIT}" != "true" ]; then
+            sed '/^ctest_submit()$/d' scripts/CTestRun.cmake > "${RUNNER_TEMP}/CTestRun.cmake"
+            CTEST_SCRIPT="${RUNNER_TEMP}/CTestRun.cmake"
+          fi
+          ctest -VV \
+            -D CDASH_MODEL=${CDASH_MODEL} \
+            -D GITHUB_PR_ID="" \
+            -D CMAKE_OPTIONS="${ENV_CMAKE_OPTIONS}" \
+            -D OUTPUT_JUNIT_FILE=${{ matrix.junit }} \
+            -S "${CTEST_SCRIPT}" \
+            -D CTEST_SITE="amd-devlab" \
+            -D CTEST_BUILD_NAME="${CTEST_BUILD_NAME}" \
+            -D CTEST_NOTES_FILES="${GITHUB_WORKSPACE}/build/CMakeCache.txt" \
+            | tee test_results.txt
+
+      # AMD-MI300A script, last three lines (hpsf-gitlab-ci.yml:340-345)
+      - name: ClangBuildAnalyzer
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          git clone https://github.com/aras-p/ClangBuildAnalyzer --depth=1 --branch v1.6.0 &&
+            test "$(git -C ClangBuildAnalyzer rev-parse HEAD)" = bae0cb488cce944bfc3da9850a69ad621701ebef &&
+            cd ClangBuildAnalyzer && cmake -B build &&
+            cmake --build build && cd ..
+          ./ClangBuildAnalyzer/build/ClangBuildAnalyzer --all build analyze_results.bin
+          ./ClangBuildAnalyzer/build/ClangBuildAnalyzer --analyze analyze_results.bin
+
+      # .common-setup after_script (hpsf-gitlab-ci.yml:30-31): ten slowest cases
+      - name: after_script
+        if: always()
+        shell: bash
+        run: |
+          sed -n "s/[0-9]*:[ ]\[[ ]*OK \] \([^ ]*\) (\([0-9]*\) ms)/\2 \1/p" test_results.txt | sort -nr | head
+
+      # GitLab: artifacts + reports: junit (hpsf-gitlab-ci.yml:346-351)
+      - name: Upload junit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.build_name }}-junit-${{ github.run_attempt }}
+          path: build/${{ matrix.junit }}
+          if-no-files-found: warn
+
+      # The container runs as root; a later job on the same machine must be
+      # able to clean the workspace.
+      - name: Hand the workspace back to the runner user
+        if: always()
+        run: chown -R --reference="${GITHUB_WORKSPACE}/.." "${GITHUB_WORKSPACE}" || true
