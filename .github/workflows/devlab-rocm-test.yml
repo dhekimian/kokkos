@@ -54,6 +54,14 @@ jobs:
       IMAGE: ${{ inputs.image || 'rocm/dev-ubuntu-24.04:10.0.0-full' }}
       LABEL: ${{ inputs.label || 'release' }}
     steps:
+      # The container runs as root; if an earlier job on this machine left
+      # root-owned files in the workspace, checkout cannot delete them.
+      - name: Clear root-owned files from an earlier job
+        run: |
+          if [ -n "$(find . -mindepth 1 ! -user "$(id -u)" -print -quit)" ]; then
+            docker run --rm -v "$PWD:/w" "$IMAGE" find /w -mindepth 1 -delete
+          fi
+
       - uses: actions/checkout@v4
 
       - name: Build and test in ${{ env.IMAGE }}
@@ -64,14 +72,20 @@ jobs:
           filter='-hip_DeathTest.abort_from_device:hip.graph_capture:hip.execution_policy_with_default_execution_space_instance:hip_graph.*'
           docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
             --security-opt seccomp=unconfined -e GTEST_FILTER="$filter" \
+            -e ROCM_PATH=/opt/rocm -e HOST_IDS="$(id -u):$(id -g)" \
             -v "$PWD:/src" -w /src "$IMAGE" bash -euo pipefail -c '
               (command -v cmake >/dev/null && command -v git >/dev/null) || \
                 (apt-get update -qq && apt-get install -y -qq cmake git >/dev/null)
+              # Hand the workspace back to the runner user however this ends.
+              trap "chown -R $HOST_IDS /src" EXIT
               # /src is owned by the runner user, not root: let git read it
               git config --global --add safe.directory "*"
               rocminfo > /tmp/rocminfo.txt 2>&1 || true
               grep -m1 -o "gfx[0-9a-f]*" /tmp/rocminfo.txt > /src/arch.txt || true
+              # ROCM_PATH and the prefix let find_package(hip) work in images whose
+              # hipcc is /usr/bin/hipcc (7.2.4-complete).
               cmake -S . -B build -DCMAKE_CXX_COMPILER=hipcc -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_PREFIX_PATH=/opt/rocm \
                 -DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_${{ matrix.arch }}=ON \
                 -DKokkos_ENABLE_TESTS=ON -DKokkos_ENABLE_LARGE_MEM_TESTS=${{ matrix.large_mem }}
               cmake --build build -j8
