@@ -1,0 +1,8 @@
+# Known upstream failures: <ctest name or gtest case glob> | <reason> | <upstream link, or "not filed">
+# A failure listed here shows as a warning; anything else fails the job. A gtest
+# case only counts as known when its binary ran to the end (no crash, no timeout).
+# These are the RDNA runtime gaps reported with the gfx1151 support PR.
+hip_DeathTest.abort_from_device | device-side abort is not reported as expected on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
+hip.graph_capture | HIP stream capture fails on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
+hip.execution_policy_with_default_execution_space_instance | fails on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
+hip_graph.* | HIP graph cases fail on RDNA; the MI300A lane filters them too | https://github.com/kokkos/kokkos/pull/9179

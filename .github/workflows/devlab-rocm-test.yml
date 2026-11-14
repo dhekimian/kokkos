@@ -68,10 +68,8 @@ jobs:
         run: |
           set -euo pipefail
           docker pull -q "$IMAGE"
-          # Known runtime gaps on RDNA (#9179); MI300A's lane filters the same graph cases.
-          filter='-hip_DeathTest.abort_from_device:hip.graph_capture:hip.execution_policy_with_default_execution_space_instance:hip_graph.*'
           docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
-            --security-opt seccomp=unconfined -e GTEST_FILTER="$filter" \
+            --security-opt seccomp=unconfined \
             -e ROCM_PATH=/opt/rocm -e HOST_IDS="$(id -u):$(id -g)" \
             -v "$PWD:/src" -w /src "$IMAGE" bash -euo pipefail -c '
               (command -v cmake >/dev/null && command -v git >/dev/null) || \
@@ -98,9 +96,66 @@ jobs:
                 export LD_LIBRARY_PATH="$(dirname "$hiplib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
                 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
               fi
-              cd build && ctest --output-on-failure --timeout 1800 --output-junit /src/junit.xml
               /opt/rocm/bin/hipconfig --version > /src/hip.txt 2>/dev/null || true
+              # Test failures do not fail this step; "Judge results" does, for new
+              # ones. Keep failed tests full output: the judge reads gtest lines.
+              rc=0
+              (cd build && ctest --output-on-failure --timeout 300 \
+                --test-output-size-failed 10000000 --output-junit /src/junit.xml) || rc=$?
+              echo "$rc" > /src/ctest-rc.txt
             '
+
+      - name: Judge results
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import fnmatch, json, os, re, xml.etree.ElementTree as ET
+          known = []
+          for line in open(".github/devlab-known-failures.txt"):
+              line = line.strip()
+              if line and not line.startswith("#"):
+                  pat, reason, issue = [f.strip() for f in line.split("|", 2)]
+                  known.append((pat, reason, issue))
+          def match(name):
+              return next((k for k in known if fnmatch.fnmatchcase(name, k[0])), None)
+          kf, nf, notes = [], [], []
+          try:
+              rc = int(open("ctest-rc.txt").read())
+          except Exception:
+              rc = None
+          if rc not in (0, 8) or not os.path.exists("junit.xml"):
+              nf.append(f"tests did not run (ctest rc={rc})")
+          else:
+              root = ET.parse("junit.xml").getroot()
+              for tc in root.iter("testcase"):
+                  if tc.find("failure") is None and tc.get("status") != "fail":
+                      continue
+                  name = tc.get("name")
+                  out = "".join(e.text or "" for e in tc.iter("system-out"))
+                  if match(name):
+                      kf.append(name); notes.append((name, match(name)))
+                      continue
+                  # A gtest binary that ran to the end lists every failed case; if
+                  # all of them are known, the ctest failure is known too.
+                  cases = sorted(set(re.findall(r"^\[  FAILED  \] (\S+?)(?:,| \(|$)", out, re.M)))
+                  finished = re.search(r"^\[==========\] \d+ tests? from \d+ test suites? ran", out, re.M)
+                  if finished and cases and all(match(c) for c in cases):
+                      for c in cases:
+                          kf.append(f"{name}: {c}"); notes.append((f"{name}: {c}", match(c)))
+                  else:
+                      nf.append(name + (f" ({', '.join(c for c in cases if not match(c))})" if finished and cases else ""))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              for name, (pat, reason, issue) in notes:
+                  print(f"::warning title=Known upstream failure::{name} — {reason} ({issue})")
+                  out.write(f"- known upstream failure: `{name}` — {reason} ({issue})\n")
+              for name in nf:
+                  print(f"::error::new failure: {name}")
+                  out.write(f"- NEW failure: `{name}`\n")
+          verdict = "fail" if nf else "known-failures" if kf else "pass"
+          json.dump({"verdict": verdict, "known_failures": kf, "new_failures": nf}, open("judge.json", "w"))
+          print("verdict:", verdict)
+          raise SystemExit(verdict == "fail")
+          PY
 
       - name: Write the run summary
         if: always()
@@ -121,12 +176,18 @@ jobs:
                        "skipped": n["skipped"],
                        "passed": n["tests"] - n["failures"] - n["errors"] - n["skipped"],
                        "seconds": round(float(s.get("time", 0)), 1)}
+          try:
+              judge = json.load(open("judge.json"))
+          except Exception:
+              judge = {"verdict": "fail", "known_failures": [], "new_failures": ["judge step did not run"]}
           summary = {
               "schema": 1, "project": "kokkos", "label": os.environ["LABEL"],
               "release": "${{ github.sha }}"[:12], "combo": os.environ["IMAGE"],
               "gpu": "${{ matrix.gpu }}", "gfx": "${{ matrix.gfx }}",
               "env": {"arch": read("arch.txt"), "hip": read("hip.txt"), "image": os.environ["IMAGE"]},
               "smoke": None, "tests": tests, "job_status": "${{ job.status }}",
+              "verdict": judge["verdict"], "known_failures": judge["known_failures"],
+              "new_failures": judge["new_failures"],
               "run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
               "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
           }
