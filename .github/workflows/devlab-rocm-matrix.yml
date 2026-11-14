@@ -19,7 +19,8 @@ jobs:
         include:
           - {name: rocm10.1, image: "rocm/dev-ubuntu-24.04:10.1.0-full"}
           - {name: rocm10.0, image: "rocm/dev-ubuntu-24.04:10.0.0-full"}
-          - {name: rocm7.14, image: "rocm/dev-ubuntu-24.04:7.14.1-full"}
+          # On 7.14 the HIP graph cases hang (hip_graph.submit_six on the R9700).
+          - {name: rocm7.14, image: "rocm/dev-ubuntu-24.04:7.14.1-full", gtest_skip: "hip_graph.*"}
           - {name: rocm7.2, image: "rocm/dev-ubuntu-24.04:7.2.4-complete"}
           # ROCm 10.2 release candidate: SDK wheels only, no image or apt repo yet.
           - {name: rocm-next, image: "ubuntu:24.04", rocm_pip: "https://rc.repo.amd.com/rocm/whl-next/"}
@@ -28,3 +29,4 @@ jobs:
       image: ${{ matrix.image }}
       label: ${{ matrix.name }}
       rocm_pip: ${{ matrix.rocm_pip || '' }}
+      gtest_skip: ${{ matrix.gtest_skip || '' }}
