@@ -67,6 +67,8 @@ jobs:
             -v "$PWD:/src" -w /src "$IMAGE" bash -euo pipefail -c '
               (command -v cmake >/dev/null && command -v git >/dev/null) || \
                 (apt-get update -qq && apt-get install -y -qq cmake git >/dev/null)
+              # /src is owned by the runner user, not root: let git read it
+              git config --global --add safe.directory "*"
               rocminfo > /tmp/rocminfo.txt 2>&1 || true
               grep -m1 -o "gfx[0-9a-f]*" /tmp/rocminfo.txt > /src/arch.txt || true
               cmake -S . -B build -DCMAKE_CXX_COMPILER=hipcc -DCMAKE_BUILD_TYPE=Release \
