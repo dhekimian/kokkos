@@ -1,0 +1,138 @@
+# Repeat a few HIP unit-test cases many times on each DevLab GPU, to measure
+# how often an intermittent failure happens before reporting it. Builds only
+# the gtest binary that holds the cases. Manual, DevLab fork only.
+name: DevLab repeat cases
+
+on:
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: gtest filter (colon-separated case names)
+        default: "hip_graph.end_of_submit_control_flow:hip_graph.aggregate_is_awaitable:hip.workgraph_fib"
+      binary:
+        description: CMake target / binary holding the cases
+        default: Kokkos_CoreUnitTest_HIP_SmokeTest
+      repeat:
+        description: --gtest_repeat count
+        default: "50"
+      images:
+        description: JSON list of ROCm containers
+        default: '["rocm/dev-ubuntu-24.04:10.0.0-full", "rocm/dev-ubuntu-24.04:10.1.0-full"]'
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    name: ${{ matrix.gpu }} (${{ matrix.gfx }}) ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        image: ${{ fromJSON(inputs.images) }}
+        gpu: [strix-halo, radeon-r9700]
+        include:
+          - {gpu: strix-halo, gfx: gfx1151, arch: AMD_GFX1151}
+          - {gpu: radeon-r9700, gfx: gfx1201, arch: AMD_GFX1201}
+    runs-on: [self-hosted, Linux, devlab-dispatch, "${{ matrix.gpu }}"]
+    timeout-minutes: 90
+    env:
+      IMAGE: ${{ matrix.image }}
+      CASES: ${{ inputs.cases }}
+      BINARY: ${{ inputs.binary }}
+      REPEAT: ${{ inputs.repeat }}
+    steps:
+      # The container runs as root; clear root-owned files an earlier job left.
+      - name: Clear root-owned files from an earlier job
+        run: |
+          if [ -n "$(find . -mindepth 1 ! -user "$(id -u)" -print -quit)" ]; then
+            docker run --rm -v "$PWD:/w" "$IMAGE" find /w -mindepth 1 -delete
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Build and repeat the cases in ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker pull -q "$IMAGE"
+          docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
+            --security-opt seccomp=unconfined \
+            -e ROCM_PATH=/opt/rocm -e HOST_IDS="$(id -u):$(id -g)" \
+            -e CASES -e BINARY -e REPEAT \
+            -v "$PWD:/src" -w /src "$IMAGE" bash -euo pipefail -c '
+              (command -v cmake >/dev/null && command -v git >/dev/null) || \
+                (apt-get update -qq && apt-get install -y -qq cmake git >/dev/null)
+              trap "chown -R $HOST_IDS /src" EXIT
+              git config --global --add safe.directory "*"
+              cmake -S . -B build -DCMAKE_CXX_COMPILER=hipcc -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_PREFIX_PATH="$ROCM_PATH" \
+                -DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_${{ matrix.arch }}=ON -DKokkos_ENABLE_TESTS=ON
+              cmake --build build -j8 --target "$BINARY"
+              # Same loader fix as devlab-rocm-test.yml.
+              hiplib=$(find -L "$ROCM_PATH/" -name "libamdhip64.so*" -print -quit 2>/dev/null || true)
+              ldconfig -p > /tmp/ldcache.txt
+              if [ -n "$hiplib" ] && ! grep -q libamdhip64 /tmp/ldcache.txt; then
+                export LD_LIBRARY_PATH="$(dirname "$hiplib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              fi
+              "$ROCM_PATH/bin/hipconfig" --version > /src/hip.txt 2>/dev/null || true
+              bin=$(find build -type f -name "$BINARY" -perm -u+x -print -quit)
+              rc=0
+              timeout 3000 "$bin" --gtest_filter="$CASES" --gtest_repeat="$REPEAT" \
+                > /src/repeat.log 2>&1 || rc=$?
+              echo "$rc" > /src/repeat-rc.txt
+              tail -5 /src/repeat.log
+            '
+
+      - name: Count results per case
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, re, datetime
+          log = open("repeat.log", errors="replace").read() if os.path.exists("repeat.log") else ""
+          rc = open("repeat-rc.txt").read().strip() if os.path.exists("repeat-rc.txt") else None
+          cases = os.environ["CASES"].split(":")
+          counts = {}
+          for c in cases:
+              ok = len(re.findall(r"^\[       OK \] " + re.escape(c) + r" \(", log, re.M))
+              bad = len(re.findall(r"^\[  FAILED  \] " + re.escape(c) + r" \(", log, re.M))
+              counts[c] = {"ok": ok, "failed": bad}
+          hung = rc == "124"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write(f"repeat={os.environ['REPEAT']} image={os.environ['IMAGE']} rc={rc}{' (timed out)' if hung else ''}\n\n")
+              out.write("| case | ok | failed |\n|---|---|---|\n")
+              for c, v in counts.items():
+                  out.write(f"| {c} | {v['ok']} | {v['failed']} |\n")
+          # First assertion message of each failing case, for the report.
+          first = {}
+          for c in cases:
+              m = re.search(r"\[ RUN      \] " + re.escape(c) + r"\n(.*?)\[  FAILED  \] " + re.escape(c) + r" \(", log, re.S)
+              if m:
+                  first[c] = m.group(1).strip()[:600]
+          ran = sum(v["ok"] + v["failed"] for v in counts.values())
+          failed = sum(v["failed"] for v in counts.values())
+          summary = {
+              "schema": 1, "project": "kokkos", "label": "repeat",
+              "release": "${{ github.sha }}"[:12], "combo": os.environ["IMAGE"],
+              "gpu": "${{ matrix.gpu }}", "gfx": "${{ matrix.gfx }}",
+              "env": {"hip": open("hip.txt").read().strip() if os.path.exists("hip.txt") else None,
+                      "image": os.environ["IMAGE"], "repeat": int(os.environ["REPEAT"])},
+              "smoke": None,
+              "tests": {"ran": ran, "passed": ran - failed, "failed": failed, "errors": 0, "skipped": 0},
+              "cases": counts, "first_failure": first, "rc": rc, "timed_out": hung,
+              "verdict": "fail" if hung or rc not in ("0", "1") else ("known-failures" if failed else "pass"),
+              "run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+          }
+          json.dump(summary, open("summary.json", "w"), indent=1)
+          print(json.dumps(summary, indent=1))
+          PY
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devlab-summary-repeat-${{ matrix.gpu }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: |
+            summary.json
+            repeat.log
+          retention-days: 30
