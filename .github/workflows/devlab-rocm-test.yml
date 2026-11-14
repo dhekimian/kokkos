@@ -67,7 +67,8 @@ jobs:
             -v "$PWD:/src" -w /src "$IMAGE" bash -euo pipefail -c '
               (command -v cmake >/dev/null && command -v git >/dev/null) || \
                 (apt-get update -qq && apt-get install -y -qq cmake git >/dev/null)
-              rocminfo | grep -m1 -o "gfx[0-9a-f]*" > /src/arch.txt
+              rocminfo > /tmp/rocminfo.txt 2>&1 || true
+              grep -m1 -o "gfx[0-9a-f]*" /tmp/rocminfo.txt > /src/arch.txt || true
               cmake -S . -B build -DCMAKE_CXX_COMPILER=hipcc -DCMAKE_BUILD_TYPE=Release \
                 -DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_${{ matrix.arch }}=ON \
                 -DKokkos_ENABLE_TESTS=ON -DKokkos_ENABLE_LARGE_MEM_TESTS=${{ matrix.large_mem }}
