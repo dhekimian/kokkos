@@ -6,3 +6,5 @@ hip_DeathTest.abort_from_device | device-side abort is not reported as expected 
 hip.graph_capture | HIP stream capture fails on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
 hip.execution_policy_with_default_execution_space_instance | fails on RDNA (ROCm runtime) | https://github.com/kokkos/kokkos/pull/9179
 hip_graph.* | HIP graph cases fail on RDNA; the MI300A lane filters them too | https://github.com/kokkos/kokkos/pull/9179
+# ROCm 7.2.4 on both RDNA GPUs; passes on the same machines with ROCm 10.0.
+hip.mixed_then_host_device_nodes | ROCm 7.2: a graph with device, then_host, device nodes on a SharedSpace counter ends at 4, not 6 (one node's update lost) | not filed

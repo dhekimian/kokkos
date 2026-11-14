@@ -1,4 +1,4 @@
-# DevLab support matrix for Kokkos' HIP backend: each ROCm line its CI uses,
+# DevLab support matrix for Kokkos' HIP backend: recent ROCm lines,
 # on Strix Halo and the R9700. Weekly, in the DevLab fork only.
 name: DevLab support matrix
 
@@ -17,9 +17,14 @@ jobs:
       max-parallel: 2
       matrix:
         include:
+          - {name: rocm10.1, image: "rocm/dev-ubuntu-24.04:10.1.0-full"}
           - {name: rocm10.0, image: "rocm/dev-ubuntu-24.04:10.0.0-full"}
+          - {name: rocm7.14, image: "rocm/dev-ubuntu-24.04:7.14.1-full"}
           - {name: rocm7.2, image: "rocm/dev-ubuntu-24.04:7.2.4-complete"}
+          # ROCm 10.2 release candidate: SDK wheels only, no image or apt repo yet.
+          - {name: rocm-next, image: "ubuntu:24.04", rocm_pip: "https://rc.repo.amd.com/rocm/whl-next/"}
     uses: ./.github/workflows/devlab-rocm-test.yml
     with:
       image: ${{ matrix.image }}
       label: ${{ matrix.name }}
+      rocm_pip: ${{ matrix.rocm_pip || '' }}

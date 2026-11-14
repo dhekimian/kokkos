@@ -25,6 +25,9 @@ on:
     inputs:
       image: {type: string, default: rocm/dev-ubuntu-24.04:10.0.0-full}
       label: {type: string, default: release}
+      # A pip index with AMD's ROCm SDK wheels (rocm[libraries,devel]). When set,
+      # the SDK comes from there instead of the image, which only supplies the OS.
+      rocm_pip: {type: string, default: ""}
 
 permissions:
   contents: read
@@ -53,6 +56,8 @@ jobs:
     env:
       IMAGE: ${{ inputs.image || 'rocm/dev-ubuntu-24.04:10.0.0-full' }}
       LABEL: ${{ inputs.label || 'release' }}
+      ROCM_PIP: ${{ inputs.rocm_pip || '' }}
+      TORCH_INDEX_MAP: ${{ vars.TORCH_INDEX_MAP }}
     steps:
       # The container runs as root; if an earlier job on this machine left
       # root-owned files in the workspace, checkout cannot delete them.
@@ -68,9 +73,20 @@ jobs:
         run: |
           set -euo pipefail
           docker pull -q "$IMAGE"
+          # Optional mirror for the SDK index (repository variable, JSON:
+          # index URL -> mirror URL or [index, extra index]).
+          read -r pip_index pip_extra < <(python3 - <<'PY'
+          import json, os
+          url = os.environ.get("ROCM_PIP", "")
+          m = json.loads(os.environ.get("TORCH_INDEX_MAP") or "{}").get(url, url)
+          m = m if isinstance(m, list) else [m]
+          print(m[-1] if len(m) > 1 else m[0], m[0] if len(m) > 1 else "")
+          PY
+          )
           docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
-            --security-opt seccomp=unconfined \
+            --security-opt seccomp=unconfined --network host \
             -e ROCM_PATH=/opt/rocm -e HOST_IDS="$(id -u):$(id -g)" \
+            -e PIP_INDEX="${pip_index}" -e PIP_EXTRA="${pip_extra}" -e GFX=${{ matrix.gfx }} \
             -v "$PWD:/src" -w /src "$IMAGE" bash -euo pipefail -c '
               (command -v cmake >/dev/null && command -v git >/dev/null) || \
                 (apt-get update -qq && apt-get install -y -qq cmake git >/dev/null)
@@ -78,25 +94,39 @@ jobs:
               trap "chown -R $HOST_IDS /src" EXIT
               # /src is owned by the runner user, not root: let git read it
               git config --global --add safe.directory "*"
+              if [ -n "$PIP_INDEX" ]; then
+                # ROCm SDK from pip wheels: no system ROCm in the image.
+                apt-get update -qq && apt-get install -y -qq python3-venv g++ >/dev/null
+                python3 -m venv /r
+                PIP_CONFIG_FILE=/dev/null /r/bin/pip install -q --index-url "$PIP_INDEX" \
+                  ${PIP_EXTRA:+--extra-index-url "$PIP_EXTRA"} \
+                  "rocm[libraries,devel]" "rocm-sdk-device-$GFX"
+                /r/bin/rocm-sdk init
+                ROCM_PATH=$(/r/bin/rocm-sdk path --root)
+                export ROCM_PATH PATH="$ROCM_PATH/bin:$PATH"
+                /r/bin/pip list 2>/dev/null > /tmp/pip.txt
+                grep -iE "^rocm" /tmp/pip.txt > /src/rocm-pip.txt || true
+                cat /src/rocm-pip.txt
+              fi
               rocminfo > /tmp/rocminfo.txt 2>&1 || true
               grep -m1 -o "gfx[0-9a-f]*" /tmp/rocminfo.txt > /src/arch.txt || true
               # ROCM_PATH and the prefix let find_package(hip) work in images whose
               # hipcc is /usr/bin/hipcc (7.2.4-complete).
               cmake -S . -B build -DCMAKE_CXX_COMPILER=hipcc -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_PREFIX_PATH=/opt/rocm \
+                -DCMAKE_PREFIX_PATH="$ROCM_PATH" \
                 -DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_${{ matrix.arch }}=ON \
                 -DKokkos_ENABLE_TESTS=ON -DKokkos_ENABLE_LARGE_MEM_TESTS=${{ matrix.large_mem }}
               cmake --build build -j8
               # Some ROCm images (10.0.0-full) do not register the HIP runtime with
               # ld.so, so the test binaries cannot load libamdhip64; point at it.
-              hiplib=$(find -L /opt/rocm/ -name "libamdhip64.so*" -print -quit 2>/dev/null || true)
+              hiplib=$(find -L "$ROCM_PATH/" -name "libamdhip64.so*" -print -quit 2>/dev/null || true)
               echo "HIP runtime: ${hiplib:-not found}"
               ldconfig -p > /tmp/ldcache.txt
               if [ -n "$hiplib" ] && ! grep -q libamdhip64 /tmp/ldcache.txt; then
                 export LD_LIBRARY_PATH="$(dirname "$hiplib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
                 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
               fi
-              /opt/rocm/bin/hipconfig --version > /src/hip.txt 2>/dev/null || true
+              "$ROCM_PATH/bin/hipconfig" --version > /src/hip.txt 2>/dev/null || true
               # Test failures do not fail this step; "Judge results" does, for new
               # ones. Keep failed tests full output: the judge reads gtest lines.
               rc=0
@@ -184,7 +214,8 @@ jobs:
               "schema": 1, "project": "kokkos", "label": os.environ["LABEL"],
               "release": "${{ github.sha }}"[:12], "combo": os.environ["IMAGE"],
               "gpu": "${{ matrix.gpu }}", "gfx": "${{ matrix.gfx }}",
-              "env": {"arch": read("arch.txt"), "hip": read("hip.txt"), "image": os.environ["IMAGE"]},
+              "env": {"arch": read("arch.txt"), "hip": read("hip.txt"), "image": os.environ["IMAGE"],
+                      "rocm_pip": read("rocm-pip.txt")},
               "smoke": None, "tests": tests, "job_status": "${{ job.status }}",
               "verdict": judge["verdict"], "known_failures": judge["known_failures"],
               "new_failures": judge["new_failures"],
@@ -202,3 +233,12 @@ jobs:
           name: devlab-summary-${{ inputs.label || 'release' }}-${{ matrix.gpu }}-${{ github.run_attempt }}
           path: summary.json
           retention-days: 90
+
+      - name: Upload the test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devlab-junit-${{ inputs.label || 'release' }}-${{ matrix.gpu }}-${{ github.run_attempt }}
+          path: junit.xml
+          if-no-files-found: ignore
+          retention-days: 30
