@@ -79,7 +79,8 @@ jobs:
               # ld.so, so the test binaries cannot load libamdhip64; point at it.
               hiplib=$(find -L /opt/rocm/ -name "libamdhip64.so*" -print -quit 2>/dev/null || true)
               echo "HIP runtime: ${hiplib:-not found}"
-              if [ -n "$hiplib" ] && ! ldconfig -p | grep -q libamdhip64; then
+              ldconfig -p > /tmp/ldcache.txt
+              if [ -n "$hiplib" ] && ! grep -q libamdhip64 /tmp/ldcache.txt; then
                 export LD_LIBRARY_PATH="$(dirname "$hiplib")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
                 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
               fi
